@@ -760,9 +760,9 @@ class BodyAerodynamics:
         """
         Calculates the circulation distribution for an elliptical wing.
 
-        Assumes that the wing's span is defined in self.wings[0].span and that the
-        y-coordinates of the control points (from self.panels) are measured relative
-        to the wing center, ranging from -wing_span/2 to wing_span/2.
+        The spanwise control-point coordinate is measured relative to the wing
+        center along self.wings[0].spanwise_direction, so the result is independent
+        of the global origin.
 
         Args:
             gamma_0 (float): The circulation at the wing root.
@@ -773,14 +773,41 @@ class BodyAerodynamics:
         if len(self.wings) > 1:
             raise NotImplementedError("Multiple wings not yet implemented")
 
-        wing_span = self.wings[0].span
+        wing = self.wings[0]
+        spanwise_axis_norm = np.linalg.norm(wing.spanwise_direction)
+        if spanwise_axis_norm == 0:
+            raise ValueError("Wing spanwise_direction must be non-zero.")
+
+        spanwise_axis = wing.spanwise_direction / spanwise_axis_norm
+        wing_points = np.concatenate(
+            [[section.LE_point, section.TE_point] for section in wing.sections]
+        )
+        spanwise_projections = np.dot(wing_points, spanwise_axis)
+        spanwise_min = np.min(spanwise_projections)
+        spanwise_max = np.max(spanwise_projections)
+        wing_span = spanwise_max - spanwise_min
+        if wing_span <= 0:
+            raise ValueError("Wing span must be positive for elliptical circulation.")
+
+        spanwise_center = 0.5 * (spanwise_min + spanwise_max)
         logging.debug(f"wing_span: {wing_span}")
 
-        # Get the y-coordinate for each panel's control point.
-        y = np.array([panel.control_point[1] for panel in self.panels])
+        # Spanwise coordinate relative to the wing center.
+        spanwise_coordinate = np.array(
+            [
+                np.dot(panel.control_point, spanwise_axis) - spanwise_center
+                for panel in self.panels
+            ]
+        )
 
         # Compute the elliptical circulation distribution.
-        gamma_i = gamma_0 * np.sqrt(1 - (2 * y / wing_span) ** 2)
+        radicand = 1 - (2 * spanwise_coordinate / wing_span) ** 2
+        if np.any(radicand < -1e-12):
+            raise ValueError(
+                "Panel control points extend outside the wing span used for "
+                "elliptical circulation initialization."
+            )
+        gamma_i = gamma_0 * np.sqrt(np.maximum(radicand, 0.0))
 
         logging.debug(f"Calculated elliptical gamma distribution: {gamma_i}")
         return gamma_i
