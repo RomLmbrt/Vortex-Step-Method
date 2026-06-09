@@ -76,7 +76,33 @@ def test_long_filament(gamma, core_radius_fraction):
         induced_velocity[0], 0, atol=1e-8
     )  # x-component should be near zero
     assert abs(induced_velocity[1]) < 1e-8  # y-component should be very close to zero
-    assert np.isclose(induced_velocity[2], 0)  # z-component should be zero
+    assert not np.isclose(
+        induced_velocity[2], 0, atol=1e-12
+    )  # z-component should carry the azimuthal velocity
+
+
+def test_velocity_is_azimuthal_inside_and_outside_core():
+    filament = BoundFilament([0, 0, 0], [1, 0, 0])
+    gamma = 1.0
+    core_radius_fraction = 0.2
+    axis = np.array([1.0, 0.0, 0.0])
+
+    for radius in (0.05, 0.15, 0.25):
+        for angle in (0.3, 1.1, 2.2):
+            control_point = np.array(
+                [0.5, radius * np.cos(angle), radius * np.sin(angle)]
+            )
+            radial_direction = np.array([0.0, control_point[1], control_point[2]])
+            induced_velocity = filament.velocity_3D_bound_vortex(
+                control_point, gamma, core_radius_fraction
+            )
+
+            assert np.isfinite(induced_velocity).all()
+            assert not np.allclose(induced_velocity, 0.0)
+            assert np.isclose(np.dot(induced_velocity, axis), 0.0, atol=1e-10)
+            assert np.isclose(
+                np.dot(induced_velocity, radial_direction), 0.0, atol=1e-10
+            )
 
 
 def test_point_far_from_filament(gamma, core_radius_fraction):
