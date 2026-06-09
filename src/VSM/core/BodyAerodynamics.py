@@ -127,6 +127,8 @@ class BodyAerodynamics:
         spanwise_panel_distribution="uniform",
         bridle_path=None,
         ml_models_dir=None,
+        aerodynamic_center_location: float = 0.25,
+        control_point_location: float = 0.75,
     ):
         """
         Instantiate a BodyAerodynamics object from either a provided wing_instance or a YAML config file.
@@ -137,6 +139,10 @@ class BodyAerodynamics:
             wing_instance (Wing, optional): Pre-built Wing instance. If None, file_path must be provided.
             spanwise_panel_distribution (str): Panel distribution type (default: 'linear').
             is_with_bridles (bool): Whether to include bridle lines (default: False).
+            aerodynamic_center_location (float): Chord fraction (from LE) of the aerodynamic
+                center / bound vortex (default: 0.25).
+            control_point_location (float): Chord fraction (from LE) of the control point
+                (default: 0.75).
 
         Returns:
             BodyAerodynamics instance.
@@ -329,9 +335,18 @@ class BodyAerodynamics:
                     ck = int(row[3])
                     p3 = particles[ck]
                     bridle_lines.append([p2, p3, d])
-            return cls([wing_instance], bridle_lines)
+            return cls(
+                [wing_instance],
+                bridle_lines,
+                aerodynamic_center_location=aerodynamic_center_location,
+                control_point_location=control_point_location,
+            )
         else:
-            return cls([wing_instance])
+            return cls(
+                [wing_instance],
+                aerodynamic_center_location=aerodynamic_center_location,
+                control_point_location=control_point_location,
+            )
 
     def rotate(
         self,
@@ -569,44 +584,47 @@ class BodyAerodynamics:
             }
 
             di = jit_norm(
-                coordinates[2 * i, :] * cp
+                coordinates[2 * i, :] * (1 - ac)
                 + coordinates[2 * i + 1, :] * ac
-                - (coordinates[2 * i + 2, :] * cp + coordinates[2 * i + 3, :] * ac)
+                - (
+                    coordinates[2 * i + 2, :] * (1 - ac)
+                    + coordinates[2 * i + 3, :] * ac
+                )
             )
             if i == 0:
                 diplus = jit_norm(
-                    coordinates[2 * (i + 1), :] * cp
+                    coordinates[2 * (i + 1), :] * (1 - ac)
                     + coordinates[2 * (i + 1) + 1, :] * ac
                     - (
-                        coordinates[2 * (i + 1) + 2, :] * cp
+                        coordinates[2 * (i + 1) + 2, :] * (1 - ac)
                         + coordinates[2 * (i + 1) + 3, :] * ac
                     )
                 )
                 ncp = di / (di + diplus)
             elif i == n_panels - 1:
                 dimin = jit_norm(
-                    coordinates[2 * (i - 1), :] * cp
+                    coordinates[2 * (i - 1), :] * (1 - ac)
                     + coordinates[2 * (i - 1) + 1, :] * ac
                     - (
-                        coordinates[2 * (i - 1) + 2, :] * cp
+                        coordinates[2 * (i - 1) + 2, :] * (1 - ac)
                         + coordinates[2 * (i - 1) + 3, :] * ac
                     )
                 )
                 ncp = dimin / (dimin + di)
             else:
                 dimin = jit_norm(
-                    coordinates[2 * (i - 1), :] * cp
+                    coordinates[2 * (i - 1), :] * (1 - ac)
                     + coordinates[2 * (i - 1) + 1, :] * ac
                     - (
-                        coordinates[2 * (i - 1) + 2, :] * cp
+                        coordinates[2 * (i - 1) + 2, :] * (1 - ac)
                         + coordinates[2 * (i - 1) + 3, :] * ac
                     )
                 )
                 diplus = jit_norm(
-                    coordinates[2 * (i + 1), :] * cp
+                    coordinates[2 * (i + 1), :] * (1 - ac)
                     + coordinates[2 * (i + 1) + 1, :] * ac
                     - (
-                        coordinates[2 * (i + 1) + 2, :] * cp
+                        coordinates[2 * (i + 1) + 2, :] * (1 - ac)
                         + coordinates[2 * (i + 1) + 3, :] * ac
                     )
                 )
@@ -614,18 +632,20 @@ class BodyAerodynamics:
 
             ncp = 1 - ncp
 
-            # aerodynamic center at 1/4c
-            LLpoint = (section["p2"] * (1 - ncp) + section["p1"] * ncp) * cp + (
+            # aerodynamic center at the aerodynamic_center_location (default 1/4c)
+            # LE/TE blend weights must sum to 1 to stay on the chord line, so the
+            # LE weight is (1 - ac), independent of the control_point_location.
+            LLpoint = (section["p2"] * (1 - ncp) + section["p1"] * ncp) * (1 - ac) + (
                 section["p3"] * (1 - ncp) + section["p4"] * ncp
             ) * ac
-            # control point at 3/4c
-            VSMpoint = (section["p2"] * (1 - ncp) + section["p1"] * ncp) * ac + (
+            # control point at the control_point_location (default 3/4c)
+            VSMpoint = (section["p2"] * (1 - ncp) + section["p1"] * ncp) * (1 - cp) + (
                 section["p3"] * (1 - ncp) + section["p4"] * ncp
             ) * cp
 
-            # Calculating the bound
-            bound_1 = section["p1"] * cp + section["p4"] * ac
-            bound_2 = section["p2"] * cp + section["p3"] * ac
+            # Calculating the bound (located at the aerodynamic center)
+            bound_1 = section["p1"] * (1 - ac) + section["p4"] * ac
+            bound_2 = section["p2"] * (1 - ac) + section["p3"] * ac
 
             ### Calculate the local reference frame, below are all unit_vectors
             # NORMAL x_airf defined upwards from the chord-line, perpendicular to the panel
