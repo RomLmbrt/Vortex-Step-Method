@@ -104,6 +104,9 @@ def main():
     body_aero_CAD_CFD_NF_combined_polars.va_initialize(
         Umag, angle_of_attack, side_slip, yaw_rate
     )
+    print(
+        f"WingGeometry projected area: {body_aero_CAD_CFD_NF_combined_polars.wings[0].compute_projected_area():.6f}"
+    )
     # body_aero_CAD_CFD_polars.va_initialize(Umag, angle_of_attack, side_slip, yaw_rate)
     # body_aero_CAD_CFD_polars_with_bridles.va_initialize(
     #     Umag, angle_of_attack, side_slip, yaw_rate

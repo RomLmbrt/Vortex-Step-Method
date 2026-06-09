@@ -75,7 +75,8 @@ def test_compute_quasi_steady_trim_jacobian_required_arguments():
 def test_linearize_fast_dynamics_from_trim_jacobian_shapes_and_stability_flags():
     jac = np.zeros((5, 5), dtype=float)
     # Longitudinal: d(cfx)/d(vtau) and d(cmy)/d(pitch_rad)
-    jac[3, 0] = -0.2
+    # A_long[0, 0] = -dFchi/d(vtau)/mass, so a positive slope is damping.
+    jac[3, 0] = 0.2
     jac[1, 2] = -0.15
     # Lateral: simple diagonal-dominant stable block in yaw/course/roll channels
     jac[4, 3] = -0.08
