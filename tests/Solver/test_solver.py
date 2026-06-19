@@ -462,5 +462,71 @@ def test_solver_memory_efficiency(body_aero):
     assert True
 
 
+def test_build_spanwise_laplacian_tip_closures():
+    """Li/Gaunaa (TORQUE 2026) spanwise Laplacian used by the post-stall
+    artificial-viscosity regularization: interior three-point stencil plus the
+    second-order tip closures (Eq. 15) that enforce Gamma -> 0 at the wing tips.
+    """
+    solver = Solver(is_with_artificial_viscosity=True)
+    solver.n_panels = 5
+    L = solver._build_spanwise_laplacian()
+
+    # Interior rows: [..., 1, -2, 1, ...].
+    np.testing.assert_allclose(L[2], [0.0, 1.0, -2.0, 1.0, 0.0])
+    # Tip closures: (L g)_0 = -4 g_0 + 4/3 g_1, (L g)_N = 4/3 g_{N-1} - 4 g_N.
+    np.testing.assert_allclose(L[0], [-4.0, 4.0 / 3.0, 0.0, 0.0, 0.0])
+    np.testing.assert_allclose(L[-1], [0.0, 0.0, 0.0, 4.0 / 3.0, -4.0])
+    # Each tip row sums to -4 + 4/3 (a quadratic through zero at the tip), and
+    # interior rows sum to zero (constant is in the null space of the interior).
+    assert L[2].sum() == 0.0
+
+
+def test_artificial_viscosity_stabilizes_post_stall():
+    """Canonical post-stall rectangular wing (paper case b: AR=10, Cl'=-pi).
+
+    The plain fixed-point iteration develops a sawtooth instability and fails to
+    converge, while the implicit artificial-viscosity scheme converges to a smooth
+    distribution at a relaxation factor of order one.
+    """
+    AR, clp, N, V, c = 10.0, -np.pi, 50, 1.0, 2.0
+    b = AR * c
+    dz = b / N
+    alpha_g = np.deg2rad(5.0)
+    i = np.arange(N)
+    B = 1.0 / (np.pi * dz) / (4.0 * (i[None, :] - i[:, None]) ** 2 - 1.0)
+
+    def F(gamma):
+        alpha = alpha_g + (B @ gamma) / V
+        return 0.5 * V * c * (clp * (alpha - alpha_g) + 1.0)
+
+    L = Solver(is_with_artificial_viscosity=True)
+    L.n_panels = N
+    L = L._build_spanwise_laplacian()
+    mu = -0.035 * N**2 / AR * clp  # Eq. (16), > 0 since clp < 0
+    A = np.eye(N) - mu * L
+
+    def iterate(use_av, omega, max_iter=20000):
+        gamma = np.zeros(N)
+        for _ in range(max_iter):
+            prev = gamma
+            with np.errstate(over="ignore", invalid="ignore"):
+                nxt = np.linalg.solve(A, F(prev)) if use_av else F(prev)
+                gamma = (1 - omega) * prev + omega * nxt
+                ref = max(np.max(np.abs(gamma)), 1e-4)
+                if np.max(np.abs(gamma - prev)) / ref < 1e-6:
+                    return True, gamma
+        return False, gamma
+
+    base_converged, _ = iterate(use_av=False, omega=0.1)
+    av_converged, gamma_av = iterate(use_av=True, omega=0.5)
+
+    assert not base_converged  # base fixed point diverges (sawtooth)
+    assert av_converged
+    # Smooth: mean |second difference| is a small fraction of the peak circulation.
+    peak = np.max(np.abs(gamma_av))
+    sawtooth = np.mean(np.abs(gamma_av[:-2] - 2 * gamma_av[1:-1] + gamma_av[2:])) / peak
+    assert sawtooth < 0.02
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

@@ -28,6 +28,10 @@ class Solver:
         artificial_damping (dict): Artificial damping parameters.
         is_with_simonet_artificial_viscosity (bool): Enable Simonet artificial viscosity.
         _simonet_artificial_viscosity_fva (float): Simonet model parameter.
+        is_with_artificial_viscosity (bool): Enable Li/Gaunaa spanwise artificial
+            viscosity (TORQUE 2026) for post-stall stabilization in gamma_loop.
+        artificial_viscosity_factor (float): Coefficient k in the viscosity scaling
+            (default 0.035, the conservative envelope from the paper).
     """
 
     def __init__(
@@ -51,6 +55,8 @@ class Solver:
         is_with_simonet_artificial_viscosity: bool = False,
         simonet_artificial_viscosity_fva: float = None,
         is_aoa_corrected: bool = False,
+        is_with_artificial_viscosity: bool = False,
+        artificial_viscosity_factor: float = 0.035,
     ):
         """Initialize solver with configuration parameters.
 
@@ -101,6 +107,10 @@ class Solver:
         # === STALL: simonet_aritificial_viscosity ===
         self.is_with_simonet_artificial_viscosity = is_with_simonet_artificial_viscosity
         self._simonet_artificial_viscosity_fva = simonet_artificial_viscosity_fva
+        # === STALL: Li/Gaunaa spanwise artificial viscosity (TORQUE 2026) ===
+        # Parameter-free post-stall regularization; see gamma_loop.
+        self.is_with_artificial_viscosity = is_with_artificial_viscosity
+        self.artificial_viscosity_factor = artificial_viscosity_factor
 
         ## Initializing some empty properties
         self.panels = None
@@ -318,6 +328,72 @@ class Solver:
         )  # cl(alpha_eff)
         return alpha_array, Umag_array, cl_array, Umagw_array
 
+    def _build_spanwise_laplacian(self) -> np.ndarray:
+        """Discrete spanwise Laplacian ``L`` with second-order tip closures.
+
+        Interior rows use the standard three-point stencil
+        ``(L gamma)_i = gamma_{i-1} - 2 gamma_i + gamma_{i+1}``. The tip rows use
+        the closures of Li, Gaunaa, Pirrung & Lønbæk (TORQUE 2026, Eq. 15),
+        derived from a quadratic variation of circulation near the tip, which
+        enforce ``gamma -> 0`` at the wing tips to second order:
+        ``(L gamma)_0 = -4 gamma_0 + (4/3) gamma_1`` and
+        ``(L gamma)_{N-1} = (4/3) gamma_{N-2} - 4 gamma_{N-1}``.
+
+        Panels are assumed to be ordered consecutively along the span (the
+        standard VSM panel ordering) and approximately uniformly spaced. The
+        per-panel viscosity coefficient carries the ``1/dz_i^2`` spacing factor.
+        """
+        n = self.n_panels
+        laplacian = np.zeros((n, n))
+        if n < 3:
+            return laplacian
+        for i in range(1, n - 1):
+            laplacian[i, i - 1] = 1.0
+            laplacian[i, i] = -2.0
+            laplacian[i, i + 1] = 1.0
+        laplacian[0, 0] = -4.0
+        laplacian[0, 1] = 4.0 / 3.0
+        laplacian[n - 1, n - 1] = -4.0
+        laplacian[n - 1, n - 2] = 4.0 / 3.0
+        return laplacian
+
+    def _local_lift_slope(
+        self, alpha_array: np.ndarray, delta: float = np.deg2rad(0.5)
+    ) -> np.ndarray:
+        """Local lift-curve slope ``dCl/dalpha`` per panel via central differences.
+
+        Evaluated from each panel's own 2-D polar at the current effective angle
+        of attack. The slope is negative in post-stall, which is what activates
+        the artificial-viscosity regularization in :meth:`gamma_loop`.
+        """
+        slopes = np.empty(self.n_panels)
+        for i, (panel, alpha) in enumerate(zip(self.panels, alpha_array)):
+            cl_plus = panel.compute_cl(alpha + delta)
+            cl_minus = panel.compute_cl(alpha - delta)
+            slopes[i] = (cl_plus - cl_minus) / (2.0 * delta)
+        return slopes
+
+    def _panel_stall_angles(self) -> np.ndarray:
+        """Per-panel stall-onset AoA [rad]: the first local Cl maximum in the
+        positive-Cl region of each panel polar (``inf`` if the polar shows no
+        peak).
+
+        Used only as a cheap, geometry-fixed gate for the post-stall
+        artificial-viscosity branch: the regularization is a no-op while every
+        panel is below its stall onset, so this lets ``gamma_loop`` skip both the
+        lift-slope evaluation and the linear solve in attached conditions.
+        """
+        angles = np.full(self.n_panels, np.inf)
+        for i, panel in enumerate(self.panels):
+            polar = np.asarray(panel.panel_polar_data, dtype=float)
+            alpha, cl = polar[:, 0], polar[:, 1]
+            pos = np.where(cl > 0)[0]
+            for k in pos[1:-1]:  # first interior Cl peak in the positive-Cl region
+                if cl[k] > cl[k - 1] and cl[k] > cl[k + 1]:
+                    angles[i] = float(alpha[k])
+                    break
+        return angles
+
     # should add smooth circulation back
     # could add dynamic relaxation back, although it didnt work
     def gamma_loop(
@@ -341,17 +417,52 @@ class Solver:
         converged = False
         gamma_new = np.copy(gamma_initial)
         error_history = []
+
+        # Spanwise artificial-viscosity regularization (Li, Gaunaa, Pirrung &
+        # Lønbæk, TORQUE 2026). Stabilizes post-stall (negative lift-slope)
+        # circulation distributions that otherwise develop non-physical sawtooth
+        # oscillations and never converge. The discrete Laplacian and planform
+        # area are built once since the geometry is frozen during the iteration.
+        use_viscosity = self.is_with_artificial_viscosity
+        if use_viscosity:
+            laplacian = self._build_spanwise_laplacian()
+            identity = np.eye(self.n_panels)
+            planform_area = float(np.sum(self.width_array * self.chord_array))
+            # Cheap gate (computed once): the regularization is a no-op unless a
+            # panel is past its stall onset, so we skip the slope evaluation and
+            # the linear solve entirely while the wing is attached.
+            stall_angles = self._panel_stall_angles()
+
+        relaxation = self.relaxation_factor * extra_relaxation_factor
         for i in range(self.max_iterations):
             gamma = gamma_new
             alpha_array, Umag_array, cl_array, Umagw_array = (
                 self.compute_aerodynamic_quantities(gamma)
             )
-            gamma_new = (
+            gamma_target = (
                 0.5 * ((Umag_array**2) / Umagw_array) * cl_array * self.chord_array
             )
-            gamma_new = (
-                1 - self.relaxation_factor * extra_relaxation_factor
-            ) * gamma + self.relaxation_factor * extra_relaxation_factor * gamma_new
+            if use_viscosity and np.any(alpha_array > stall_angles):
+                # Implicit fixed point (I - diag(mu) L) gamma = F(gamma): same
+                # steady solution as the explicit scheme but stable at relaxation
+                # factors of order one, whereas the explicit stable step shrinks
+                # like N^-2 in post-stall. The coefficient
+                # mu_i = max(0, -k S Cl'_i / dz_i^2) with k = 0.035 reduces to
+                # mu = max(0, -k N^2/AR Cl') for a uniformly spaced wing (Eq. 16).
+                lift_slope = self._local_lift_slope(alpha_array)
+                mu_array = np.maximum(
+                    0.0,
+                    -self.artificial_viscosity_factor
+                    * planform_area
+                    * lift_slope
+                    / self.width_array**2,
+                )
+                gamma_regularized = np.linalg.solve(
+                    identity - mu_array[:, None] * laplacian, gamma_target
+                )
+                gamma_new = (1 - relaxation) * gamma + relaxation * gamma_regularized
+            else:
+                gamma_new = (1 - relaxation) * gamma + relaxation * gamma_target
 
             # Checking convergence using normalized error
             reference_error = (
@@ -366,8 +477,10 @@ class Solver:
             # Store error for oscillation detection
             error_history.append(normalized_error)
 
-            # Simple oscillation detection and handling
-            if i >= 5 and len(error_history) >= 3:
+            # Simple oscillation detection and handling. Skipped when artificial
+            # viscosity is active, since the regularization already suppresses the
+            # sawtooth oscillations this heuristic targets.
+            if not use_viscosity and i >= 5 and len(error_history) >= 3:
                 if (
                     error_history[-1] > error_history[-2]
                     and error_history[-2] < error_history[-3]
