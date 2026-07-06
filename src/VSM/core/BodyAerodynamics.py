@@ -321,7 +321,7 @@ class BodyAerodynamics:
                         "Add it there (with diameter 'd') or rename to match."
                     )
 
-                d = bridle_lines_dict[name]["d"]
+                d = bridle_lines_dict[name]["diameter"]
 
                 # First segment (ci -> cj)
                 ci = int(row[1])
