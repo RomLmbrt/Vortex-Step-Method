@@ -127,6 +127,8 @@ class BodyAerodynamics:
         spanwise_panel_distribution="uniform",
         bridle_path=None,
         ml_models_dir=None,
+        aerodynamic_center_location: float = 0.25,
+        control_point_location: float = 0.75,
     ):
         """
         Instantiate a BodyAerodynamics object from either a provided wing_instance or a YAML config file.
@@ -137,6 +139,10 @@ class BodyAerodynamics:
             wing_instance (Wing, optional): Pre-built Wing instance. If None, file_path must be provided.
             spanwise_panel_distribution (str): Panel distribution type (default: 'linear').
             is_with_bridles (bool): Whether to include bridle lines (default: False).
+            aerodynamic_center_location (float): Chord fraction (from LE) of the aerodynamic
+                center / bound vortex (default: 0.25).
+            control_point_location (float): Chord fraction (from LE) of the control point
+                (default: 0.75).
 
         Returns:
             BodyAerodynamics instance.
@@ -329,9 +335,18 @@ class BodyAerodynamics:
                     ck = int(row[3])
                     p3 = particles[ck]
                     bridle_lines.append([p2, p3, d])
-            return cls([wing_instance], bridle_lines)
+            return cls(
+                [wing_instance],
+                bridle_lines,
+                aerodynamic_center_location=aerodynamic_center_location,
+                control_point_location=control_point_location,
+            )
         else:
-            return cls([wing_instance])
+            return cls(
+                [wing_instance],
+                aerodynamic_center_location=aerodynamic_center_location,
+                control_point_location=control_point_location,
+            )
 
     def rotate(
         self,
@@ -569,44 +584,47 @@ class BodyAerodynamics:
             }
 
             di = jit_norm(
-                coordinates[2 * i, :] * cp
+                coordinates[2 * i, :] * (1 - ac)
                 + coordinates[2 * i + 1, :] * ac
-                - (coordinates[2 * i + 2, :] * cp + coordinates[2 * i + 3, :] * ac)
+                - (
+                    coordinates[2 * i + 2, :] * (1 - ac)
+                    + coordinates[2 * i + 3, :] * ac
+                )
             )
             if i == 0:
                 diplus = jit_norm(
-                    coordinates[2 * (i + 1), :] * cp
+                    coordinates[2 * (i + 1), :] * (1 - ac)
                     + coordinates[2 * (i + 1) + 1, :] * ac
                     - (
-                        coordinates[2 * (i + 1) + 2, :] * cp
+                        coordinates[2 * (i + 1) + 2, :] * (1 - ac)
                         + coordinates[2 * (i + 1) + 3, :] * ac
                     )
                 )
                 ncp = di / (di + diplus)
             elif i == n_panels - 1:
                 dimin = jit_norm(
-                    coordinates[2 * (i - 1), :] * cp
+                    coordinates[2 * (i - 1), :] * (1 - ac)
                     + coordinates[2 * (i - 1) + 1, :] * ac
                     - (
-                        coordinates[2 * (i - 1) + 2, :] * cp
+                        coordinates[2 * (i - 1) + 2, :] * (1 - ac)
                         + coordinates[2 * (i - 1) + 3, :] * ac
                     )
                 )
                 ncp = dimin / (dimin + di)
             else:
                 dimin = jit_norm(
-                    coordinates[2 * (i - 1), :] * cp
+                    coordinates[2 * (i - 1), :] * (1 - ac)
                     + coordinates[2 * (i - 1) + 1, :] * ac
                     - (
-                        coordinates[2 * (i - 1) + 2, :] * cp
+                        coordinates[2 * (i - 1) + 2, :] * (1 - ac)
                         + coordinates[2 * (i - 1) + 3, :] * ac
                     )
                 )
                 diplus = jit_norm(
-                    coordinates[2 * (i + 1), :] * cp
+                    coordinates[2 * (i + 1), :] * (1 - ac)
                     + coordinates[2 * (i + 1) + 1, :] * ac
                     - (
-                        coordinates[2 * (i + 1) + 2, :] * cp
+                        coordinates[2 * (i + 1) + 2, :] * (1 - ac)
                         + coordinates[2 * (i + 1) + 3, :] * ac
                     )
                 )
@@ -614,18 +632,20 @@ class BodyAerodynamics:
 
             ncp = 1 - ncp
 
-            # aerodynamic center at 1/4c
-            LLpoint = (section["p2"] * (1 - ncp) + section["p1"] * ncp) * cp + (
+            # aerodynamic center at the aerodynamic_center_location (default 1/4c)
+            # LE/TE blend weights must sum to 1 to stay on the chord line, so the
+            # LE weight is (1 - ac), independent of the control_point_location.
+            LLpoint = (section["p2"] * (1 - ncp) + section["p1"] * ncp) * (1 - ac) + (
                 section["p3"] * (1 - ncp) + section["p4"] * ncp
             ) * ac
-            # control point at 3/4c
-            VSMpoint = (section["p2"] * (1 - ncp) + section["p1"] * ncp) * ac + (
+            # control point at the control_point_location (default 3/4c)
+            VSMpoint = (section["p2"] * (1 - ncp) + section["p1"] * ncp) * (1 - cp) + (
                 section["p3"] * (1 - ncp) + section["p4"] * ncp
             ) * cp
 
-            # Calculating the bound
-            bound_1 = section["p1"] * cp + section["p4"] * ac
-            bound_2 = section["p2"] * cp + section["p3"] * ac
+            # Calculating the bound (located at the aerodynamic center)
+            bound_1 = section["p1"] * (1 - ac) + section["p4"] * ac
+            bound_2 = section["p2"] * (1 - ac) + section["p3"] * ac
 
             ### Calculate the local reference frame, below are all unit_vectors
             # NORMAL x_airf defined upwards from the chord-line, perpendicular to the panel
@@ -760,9 +780,9 @@ class BodyAerodynamics:
         """
         Calculates the circulation distribution for an elliptical wing.
 
-        Assumes that the wing's span is defined in self.wings[0].span and that the
-        y-coordinates of the control points (from self.panels) are measured relative
-        to the wing center, ranging from -wing_span/2 to wing_span/2.
+        The spanwise control-point coordinate is measured relative to the wing
+        center along self.wings[0].spanwise_direction, so the result is independent
+        of the global origin.
 
         Args:
             gamma_0 (float): The circulation at the wing root.
@@ -773,14 +793,41 @@ class BodyAerodynamics:
         if len(self.wings) > 1:
             raise NotImplementedError("Multiple wings not yet implemented")
 
-        wing_span = self.wings[0].span
+        wing = self.wings[0]
+        spanwise_axis_norm = np.linalg.norm(wing.spanwise_direction)
+        if spanwise_axis_norm == 0:
+            raise ValueError("Wing spanwise_direction must be non-zero.")
+
+        spanwise_axis = wing.spanwise_direction / spanwise_axis_norm
+        wing_points = np.concatenate(
+            [[section.LE_point, section.TE_point] for section in wing.sections]
+        )
+        spanwise_projections = np.dot(wing_points, spanwise_axis)
+        spanwise_min = np.min(spanwise_projections)
+        spanwise_max = np.max(spanwise_projections)
+        wing_span = spanwise_max - spanwise_min
+        if wing_span <= 0:
+            raise ValueError("Wing span must be positive for elliptical circulation.")
+
+        spanwise_center = 0.5 * (spanwise_min + spanwise_max)
         logging.debug(f"wing_span: {wing_span}")
 
-        # Get the y-coordinate for each panel's control point.
-        y = np.array([panel.control_point[1] for panel in self.panels])
+        # Spanwise coordinate relative to the wing center.
+        spanwise_coordinate = np.array(
+            [
+                np.dot(panel.control_point, spanwise_axis) - spanwise_center
+                for panel in self.panels
+            ]
+        )
 
         # Compute the elliptical circulation distribution.
-        gamma_i = gamma_0 * np.sqrt(1 - (2 * y / wing_span) ** 2)
+        radicand = 1 - (2 * spanwise_coordinate / wing_span) ** 2
+        if np.any(radicand < -1e-12):
+            raise ValueError(
+                "Panel control points extend outside the wing span used for "
+                "elliptical circulation initialization."
+            )
+        gamma_i = gamma_0 * np.sqrt(np.maximum(radicand, 0.0))
 
         logging.debug(f"Calculated elliptical gamma distribution: {gamma_i}")
         return gamma_i

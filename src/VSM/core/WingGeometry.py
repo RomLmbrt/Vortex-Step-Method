@@ -68,10 +68,18 @@ class Wing:
         )
 
     def find_farthest_point_and_sort(self, sections: list) -> list:
-        """Sort sections based on proximity for proper mesh ordering.
+        """Sort sections along the wing's spanwise direction for mesh ordering.
 
-        Determines starting section with positive y-coordinate that is farthest
-        from all others, then sorts remaining sections by proximity.
+        The first section is the one farthest along the positive spanwise
+        direction; the remaining sections are appended by nearest-neighbour
+        proximity. The spanwise axis is derived intrinsically from the geometry
+        (the dominant axis of the section-position spread) and its sign is
+        oriented using the wing's ``spanwise_direction`` vector. Because the
+        ordering is based on this intrinsic axis rather than the global +y axis,
+        it is robust to arbitrary wing orientations (large roll/pitch/yaw).
+
+        For nominal geometries whose span lies along +y this reproduces the
+        previous +y-first ordering exactly.
 
         Args:
             sections (list): List of Section objects to sort.
@@ -80,35 +88,73 @@ class Wing:
             list: Sorted list of Section objects.
 
         Raises:
-            ValueError: If no section has positive y-coordinate.
+            ValueError: If the geometry is degenerate (all section reference
+                points coincide / the wing has zero span).
         """
 
         # Helper function to compute radial distance
         def radial_distance(point1, point2):
             return np.linalg.norm(np.array(point1) - np.array(point2))
 
-        # Find the point with positive y that is furthest from all others
-        farthest_point = None
-        max_distance = -1
-        for section in sections:
-            if section.LE_point[1] > 0:  # Ensure the y-coordinate is positive
-                total_distance = sum(
-                    radial_distance(section.LE_point, other.LE_point)
-                    for other in sections
-                )
-                if total_distance > max_distance:
-                    max_distance = total_distance
-                    farthest_point = section
+        if len(sections) < 2:
+            return list(sections)
 
-        if not farthest_point:
-            raise ValueError("No section has a positive y-coordinate.")
+        points = np.array([section.LE_point for section in sections], dtype=float)
 
-        # Remove the farthest point from the list and use it as the starting point
+        # Determine the spanwise axis intrinsically from the section spread, so
+        # the ordering is independent of the global wing orientation.
+        centroid = points.mean(axis=0)
+        centered = points - centroid
+        # Dominant direction of the point spread (principal axis).
+        _, singular_values, vh = np.linalg.svd(centered, full_matrices=False)
+        span_axis = vh[0]
+
+        # Degenerate geometry: all section reference points effectively coincide.
+        spread = float(singular_values[0]) if singular_values.size else 0.0
+        if spread <= 1e-12:
+            raise ValueError(
+                "Cannot order wing sections: all section reference points "
+                "coincide (zero span). Provide at least two distinct sections."
+            )
+
+        # Orient the axis deterministically. Prefer the wing's
+        # spanwise_direction (kept aligned with the geometry under rotations);
+        # fall back to a canonical sign rule if it is unavailable or orthogonal
+        # to the span axis.
+        span_dir = np.asarray(self.spanwise_direction, dtype=float)
+        span_dir_norm = np.linalg.norm(span_dir)
+        orientation = 0.0
+        if span_dir_norm > 1e-12:
+            orientation = float(np.dot(span_axis, span_dir / span_dir_norm))
+        if abs(orientation) > 1e-8:
+            if orientation < 0:
+                span_axis = -span_axis
+        else:
+            # Deterministic fallback independent of any provided span vector:
+            # make the largest-magnitude component positive (index tie-break).
+            dominant = max(range(3), key=lambda k: (abs(span_axis[k]), -k))
+            if span_axis[dominant] < 0:
+                span_axis = -span_axis
+
+        # Project section points onto the oriented span axis.
+        projections = centered @ span_axis
+
+        # Starting section: farthest along the positive span direction. Ties are
+        # broken deterministically (total distance to all others, then point
+        # coordinates) so the result is stable regardless of input order.
+        def start_key(i):
+            total_distance = sum(
+                radial_distance(points[i], points[j]) for j in range(len(points))
+            )
+            return (projections[i], total_distance, tuple(points[i]))
+
+        start_index = max(range(len(sections)), key=start_key)
+        farthest_point = sections[start_index]
+
+        # Remove the starting section from the list and use it as the start
         sorted_sections = [farthest_point]
         remaining_sections = [
-            section
-            for section in sections
-            if not np.allclose(section.LE_point, farthest_point.LE_point)
+            section for k, section in enumerate(sections) if k != start_index
         ]
 
         # Iteratively sort the remaining sections based on proximity

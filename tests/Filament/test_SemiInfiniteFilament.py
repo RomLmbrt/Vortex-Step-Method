@@ -37,7 +37,7 @@ def test_compute_induced_velocity_semi_infinite(core_radius_fraction):
     gamma = -gamma
     r1 = control_point - x1
     r1_cross_direction = np.cross(r1, direction)
-    r_perp = np.dot(r1, direction) * direction
+    r_perp = r1 - np.dot(r1, direction) * direction
     alpha0 = 1.25643
     nu = 1.48e-5
     epsilon = np.sqrt(4 * alpha0 * nu * np.linalg.norm(r_perp) / Uinf)
@@ -50,9 +50,7 @@ def test_compute_induced_velocity_semi_infinite(core_radius_fraction):
         )
         induced_velocity_analytical = K * r1_cross_direction * filament_direction
     else:
-        r1_proj = np.dot(r1, direction) * direction + epsilon * (
-            r1 / np.linalg.norm(r1) - direction
-        ) / np.linalg.norm(r1 / np.linalg.norm(r1) - direction)
+        r1_proj = np.dot(r1, direction) * direction + epsilon * r_perp / np.linalg.norm(r_perp)
         r1_cross_direction_proj = np.cross(r1_proj, direction)
         K_proj = (
             gamma
@@ -67,6 +65,29 @@ def test_compute_induced_velocity_semi_infinite(core_radius_fraction):
     np.testing.assert_almost_equal(
         induced_velocity_calc, induced_velocity_analytical, decimal=6
     )
+
+
+def test_velocity_is_azimuthal_inside_core():
+    x1 = np.array([0, 0, 0])
+    direction = np.array([1.0, 0.0, 0.0])
+    filament_direction = 1
+    Uinf = 0.01
+    gamma = 1.0
+    semi_infinite_filament = SemiInfiniteFilament(
+        x1, direction, Uinf, filament_direction
+    )
+
+    control_point = np.array([0.5, 1e-4, 2e-4])
+    induced_velocity = semi_infinite_filament.velocity_3D_trailing_vortex_semiinfinite(
+        direction, control_point, gamma, Uinf
+    )
+
+    radial_direction = control_point - np.dot(control_point - x1, direction) * direction
+
+    assert np.isfinite(induced_velocity).all()
+    assert not np.allclose(induced_velocity, 0.0)
+    assert np.isclose(np.dot(induced_velocity, direction), 0.0, atol=1e-10)
+    assert np.isclose(np.dot(induced_velocity, radial_direction), 0.0, atol=1e-10)
 
 
 def test_a_very_close_point(gamma, core_radius_fraction):

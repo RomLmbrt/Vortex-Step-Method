@@ -234,6 +234,82 @@ def test_refine_aeordynamic_mesh_lei_airfoil_interpolation():
         assert section.polar_data.shape[1] == 4
 
 
+def _rotation_matrix(axis, angle_deg):
+    """Rodrigues rotation matrix about a unit-able axis."""
+    axis = np.asarray(axis, dtype=float)
+    axis = axis / np.linalg.norm(axis)
+    theta = np.deg2rad(angle_deg)
+    kx, ky, kz = axis
+    K = np.array([[0, -kz, ky], [kz, 0, -kx], [-ky, kx, 0]], dtype=float)
+    return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+
+
+def test_refine_aerodynamic_mesh_robust_to_large_rotation():
+    """Meshing must be orientation-agnostic: a large yaw + roll must not crash
+    and must yield the same section count and physically consistent ordering as
+    the unrotated wing (regression for the +y-only assumption)."""
+    n_panels = 6
+    span = 20
+    polar_data = make_inviscid_polar_data()
+
+    def build_wing():
+        wing = Wing(n_panels, spanwise_panel_distribution="uniform")
+        wing.add_section([0, span / 2, 0], [-1, span / 2, 0], polar_data)
+        wing.add_section([0, span / 4, 0], [-1, span / 4, 0], polar_data)
+        wing.add_section([0, 0, 0], [-1, 0, 0], polar_data)
+        wing.add_section([0, -span / 4, 0], [-1, -span / 4, 0], polar_data)
+        wing.add_section([0, -span / 2, 0], [-1, -span / 2, 0], polar_data)
+        return wing
+
+    # Reference (nominal, span along +y) ordering.
+    ref_wing = build_wing()
+    ref_sections = ref_wing.refine_aerodynamic_mesh()
+
+    # Trimmed attitude: a large yaw (-45 deg about z) and a large roll (50 deg
+    # about x), plus a translation that lifts the whole wing so every section
+    # ends up at y <= 0 in the global frame (as for a kite flown off-axis).
+    R = _rotation_matrix([1, 0, 0], 50.0) @ _rotation_matrix([0, 0, 1], -45.0)
+    t = np.array([0.0, -50.0, 0.0])
+
+    rot_wing = build_wing()
+    for section in rot_wing.sections:
+        section.LE_point = R @ section.LE_point + t
+        section.TE_point = R @ section.TE_point + t
+    # Keep the spanwise direction aligned with the rotated geometry, mirroring
+    # BodyAerodynamics.rotate.
+    rot_wing.spanwise_direction = R @ rot_wing.spanwise_direction
+
+    # All section reference points are now at y <= 0; this used to raise
+    # ValueError("No section has a positive y-coordinate.").
+    assert np.all([s.LE_point[1] <= 1e-9 for s in rot_wing.sections])
+
+    rot_sections = rot_wing.refine_aerodynamic_mesh()
+
+    # Same number of panels/sections as the unrotated case.
+    assert len(rot_sections) == len(ref_sections) == n_panels + 1
+
+    # Consistent ordering: section i of the rotated mesh is the same physical
+    # section as section i of the reference mesh, i.e. rotated by R (+ t).
+    for ref, rot in zip(ref_sections, rot_sections):
+        np.testing.assert_allclose(
+            rot.LE_point, R @ ref.LE_point + t, rtol=1e-6, atol=1e-8
+        )
+        np.testing.assert_allclose(
+            rot.TE_point, R @ ref.TE_point + t, rtol=1e-6, atol=1e-8
+        )
+
+
+def test_find_farthest_point_and_sort_raises_on_zero_span():
+    """A genuinely degenerate wing (all coincident points) must raise clearly."""
+    polar_data = make_inviscid_polar_data()
+    wing = Wing(n_panels=2, spanwise_panel_distribution="uniform")
+    wing.add_section([0, 0, 0], [-1, 0, 0], polar_data)
+    wing.add_section([0, 0, 0], [-1, 0, 0], polar_data)
+    wing.add_section([0, 0, 0], [-1, 0, 0], polar_data)
+    with pytest.raises(ValueError, match="coincide"):
+        wing.refine_aerodynamic_mesh()
+
+
 def test_refine_mesh_by_splitting_provided_sections():
     # Create mock sections with polar data
     polar_data = make_inviscid_polar_data()

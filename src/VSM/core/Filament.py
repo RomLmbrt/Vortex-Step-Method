@@ -111,14 +111,19 @@ class BoundFilament(Filament):
             logging.info(
                 f"distance from control point to filament: {jit_norm(r1Xr0) / jit_norm(r0)}"
             )
-            # The control point is placed on the edge of the radius core
-            # proj stands for the vectors respect to the new controlpoint
-            r1_proj = jit_dot(r1, r0) * r0 / (
-                jit_norm(r0) ** 2
-            ) + epsilon * r1Xr0 / jit_norm(r1Xr0)
-            r2_proj = jit_dot(r2, r0) * r0 / (
-                jit_norm(r0) ** 2
-            ) + epsilon * r2Xr0 / jit_norm(r2Xr0)
+            # Compute radial components (perpendicular to filament axis)
+            r1_radial = r1 - jit_dot(r1, r0) * r0 / (jit_norm(r0) ** 2)
+            r2_radial = r2 - jit_dot(r2, r0) * r0 / (jit_norm(r0) ** 2)
+
+            # Project the field points radially onto the core boundary
+            r1_proj = (
+                jit_dot(r1, r0) * r0 / (jit_norm(r0) ** 2)
+                + epsilon * r1_radial / jit_norm(r1_radial)
+            )
+            r2_proj = (
+                jit_dot(r2, r0) * r0 / (jit_norm(r0) ** 2)
+                + epsilon * r2_radial / jit_norm(r2_radial)
+            )
             r1Xr2_proj = jit_cross(r1_proj, r2_proj)
             vel_ind_proj = (
                 gamma
@@ -155,9 +160,8 @@ class BoundFilament(Filament):
         r1 = XVP - XV1  # Controlpoint to one end of the vortex filament
         r2 = XVP - XV2  # Controlpoint to one end of the vortex filament
 
-        r_perp = (
-            jit_dot(r1, r0) * r0 / (jit_norm(r0) ** 2)
-        )  # Vector from XV1 to XVP perpendicular to the core radius
+        r_perp = r1 - jit_dot(r1, r0) * r0 / (jit_norm(r0) ** 2)
+        # Vector from XV1 to XVP perpendicular to the filament axis
         epsilon = np.sqrt(
             4 * self._alpha0 * self._nu * jit_norm(r_perp) / Uinf
         )  # Cut-off radius
@@ -183,14 +187,19 @@ class BoundFilament(Filament):
             return np.zeros(3)
         # if point is inside the core radius of filament
         else:
-            # The control point is placed on the edge of the radius core
-            # proj stands for the vectors respect to the new controlpoint
-            r1_proj = jit_dot(r1, r0) * r0 / (
-                jit_norm(r0) ** 2
-            ) + epsilon * r1Xr0 / jit_norm(r1Xr0)
-            r2_proj = jit_dot(r2, r0) * r0 / (
-                jit_norm(r0) ** 2
-            ) + epsilon * r2Xr0 / jit_norm(r2Xr0)
+            # Compute radial components (perpendicular to filament axis)
+            r1_radial = r1 - jit_dot(r1, r0) * r0 / (jit_norm(r0) ** 2)
+            r2_radial = r2 - jit_dot(r2, r0) * r0 / (jit_norm(r0) ** 2)
+
+            # Project the field points radially onto the core boundary
+            r1_proj = (
+                jit_dot(r1, r0) * r0 / (jit_norm(r0) ** 2)
+                + epsilon * r1_radial / jit_norm(r1_radial)
+            )
+            r2_proj = (
+                jit_dot(r2, r0) * r0 / (jit_norm(r0) ** 2)
+                + epsilon * r2_radial / jit_norm(r2_radial)
+            )
             r1Xr2_proj = jit_cross(r1_proj, r2_proj)
             vel_ind_proj = (
                 gamma
@@ -278,10 +287,12 @@ class SemiInfiniteFilament(Filament):
 
         r1 = XVP - XV1  # Vector from XV1 to XVP
         r1XVf = jit_cross(r1, Vf)
+        r_perp = r1 - jit_dot(r1, Vf) * Vf  # Vector from XV1 to XVP perpendicular to the filament axis
 
-        r_perp = (
-            jit_dot(r1, Vf) * Vf
-        )  # Vector from XV1 to XVP perpendicular to the core radius
+        # If the control point lies on the filament axis, return zero to avoid divisions by zero
+        if jit_norm(r_perp) < 1e-16:
+            return np.zeros(3)
+
         epsilon = np.sqrt(
             4 * self._alpha0 * self._nu * jit_norm(r_perp) / Uinf
         )  # Cut-off radius
@@ -303,9 +314,8 @@ class SemiInfiniteFilament(Filament):
             return np.zeros(3)
         # else, if point within core
         else:
-            r1_proj = jit_dot(r1, Vf) * Vf + epsilon * (
-                r1 / jit_norm(r1) - Vf
-            ) / jit_norm(r1 / jit_norm(r1) - Vf)
+            r1_radial = r1 - jit_dot(r1, Vf) * Vf
+            r1_proj = jit_dot(r1, Vf) * Vf + epsilon * r1_radial / jit_norm(r1_radial)
             r1XVf_proj = jit_cross(r1_proj, Vf)
             K = (
                 GAMMA
